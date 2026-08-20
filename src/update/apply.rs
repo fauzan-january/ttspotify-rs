@@ -144,10 +144,27 @@ pub async fn download_and_apply(
     let _ = std::fs::remove_file(&tmp);
     replaced?;
 
-    // Post-update: stamp any newly-added config keys into every config on disk,
-    // so they are present without having to run each bot. Best-effort; a top-up
-    // problem must never fail an otherwise-successful update.
-    crate::config::top_up_configs();
+    // Post-update work runs in the binary that just arrived, not in this one.
+    //
+    // This process is still the old version: self_replace swapped the file on
+    // disk, but the code and the constants in memory are the ones that were
+    // loaded at launch. Anything decided here — whether a config is missing
+    // keys, whether the systemd unit predates the current template — would be
+    // decided against the outgoing version's idea of current, which is always
+    // "nothing to do". That is exactly how every installed unit stayed on the
+    // version that wrote it. So re-exec the new file and let it decide.
+    //
+    // Best-effort: an update that succeeded must not be reported as failed
+    // because the follow-up could not run. The same work happens at the next
+    // bot start regardless.
+    //
+    // Not on Windows. There is no CLI there — the exe is the tray, and its
+    // `main` ignores every argument but `--setup`, so re-running it would put a
+    // second tray icon on screen in the middle of an update. The tray relaunches
+    // itself into the new binary anyway, and that relaunch reconciles on the way
+    // up, so the work still happens in the new version.
+    #[cfg(not(windows))]
+    let _ = std::process::Command::new(&exe).arg("post-update").status();
     Ok(())
 }
 

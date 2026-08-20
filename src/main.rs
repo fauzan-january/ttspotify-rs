@@ -338,6 +338,13 @@ enum Commands {
     /// Update the bot itself
     Update,
 
+    /// Finish an update: bring configs, the service file and the YouTube
+    /// tools into line with this version. Re-executed by the updater so this
+    /// work runs in the new binary rather than the one it replaced; hidden
+    /// because there is never a reason to type it.
+    #[command(name = "post-update", hide = true)]
+    PostUpdate,
+
     /// Print a completion script for your shell
     Completions {
         /// bash, zsh, fish, elvish or powershell
@@ -512,20 +519,12 @@ async fn main() -> Result<(), BotError> {
 
     let _log_guard = tt_spotify_bot::logging::init_logging(&config_path);
 
-    // Say it where it will be seen rather than asking: this runs under systemd
-    // as often as not, where there is nobody to answer a prompt. An upgrade
-    // done by any means other than the built-in updater — a new tarball over
-    // the old binary, a package, a copy from a build — leaves the unit as it
-    // was, and nothing else mentions it outside `doctor`.
-    #[cfg(target_os = "linux")]
-    if let Some((installed, current)) = tt_spotify_bot::service::installed_unit_version() {
-        if installed < current {
-            tracing::warn!(
-                "Your systemd service file is from an older release. To refresh it, {}",
-                tt_spotify_bot::hints::install_service()
-            );
-        }
-    }
+    // Catch up with whatever this binary expects but the disk has not got yet.
+    // Every start, because a binary can be replaced by means that run no
+    // updater at all — a tarball unpacked over the old one, a package, a copy
+    // from a build — and this is the first moment the new code runs.
+    // Idempotent and silent when there is nothing to do.
+    tt_spotify_bot::postupdate::reconcile(tt_spotify_bot::postupdate::Mode::Startup);
     tt_spotify_bot::paths::log_migration(&layout_migration);
 
     // Carries the current channel across restarts (in memory); the config
@@ -701,6 +700,11 @@ async fn run_command(command: Commands) -> Result<(), BotError> {
             Some(ServiceAction::Remove) => tt_spotify_bot::service::uninstall_service(),
             None => print_subcommand_help("service"),
         },
+
+        Commands::PostUpdate => {
+            tt_spotify_bot::postupdate::reconcile(tt_spotify_bot::postupdate::Mode::Interactive);
+            Ok(())
+        }
 
         Commands::Youtube { action } => {
             let result = match action {
@@ -955,10 +959,10 @@ async fn run_cli_update() -> Result<(), BotError> {
     match tt_spotify_bot::update::download_and_apply(&info, &progress, &cancel).await {
         Ok(()) => {
             println!("\nUpdated to {}.", info.tag);
-            // Offer the unit refresh BEFORE restarting bots so a restart
-            // picks up the rewritten (daemon-reloaded) unit.
-            #[cfg(target_os = "linux")]
-            tt_spotify_bot::service::offer_unit_refresh();
+            // The service file, the configs and the YouTube tools were
+            // reconciled inside download_and_apply, by the new binary and
+            // before this point, so a restart below picks up the rewritten
+            // (daemon-reloaded) unit.
             #[cfg(target_os = "linux")]
             tt_spotify_bot::service::offer_restart_running_bots();
             #[cfg(not(target_os = "linux"))]

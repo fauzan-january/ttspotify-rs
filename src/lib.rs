@@ -10,6 +10,7 @@ pub mod i18n;
 pub mod logging;
 pub mod net;
 pub mod paths;
+pub mod postupdate;
 pub mod player;
 pub mod proc;
 #[cfg(target_os = "linux")]

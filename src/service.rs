@@ -316,31 +316,126 @@ pub(crate) fn write_unit_file_for(exe_path: &Path) -> Result<PathBuf, BotError> 
     Ok(config_base)
 }
 
-/// After a successful `--update`: if the installed unit file predates the
-/// current template, offer (y/N) to rewrite it. Never touches anything
-/// without the user saying yes — a rewrite replaces manual edits.
-pub fn offer_unit_refresh() {
-    let service_path = systemd_dir().join(SERVICE_NAME);
-    let Ok(contents) = std::fs::read_to_string(&service_path) else {
-        return; // Not installed as a service: nothing to refresh.
+/// What [`refresh_stale_unit`] did, so the caller can report it in whatever
+/// voice suits it (a log line from a bot, a printed line from the CLI).
+#[derive(Debug, PartialEq, Eq)]
+pub enum UnitRefresh {
+    /// No unit installed: this machine does not run bots as services.
+    NotInstalled,
+    /// The installed unit is already at the current template version.
+    Current,
+    /// Rewritten from version `.0` to the current one.
+    Refreshed(u32),
+    /// The unit is stale and the rewrite failed. The user has to run the
+    /// service install by hand, which is what the old release did anyway.
+    Failed(String),
+}
+
+/// The `--config` argument an installed unit passes, exactly as written in its
+/// `ExecStart` — still systemd-escaped, and with `%I` intact. `None` when the
+/// line has no `--config` at all.
+///
+/// Raw on purpose. A refresh writes this back verbatim, and unescaping it on
+/// the way out only to escape it on the way in turns the instance specifier
+/// `%I` into a literal `%%I`, which systemd then hands to the bot as the text
+/// "%I" instead of the bot's name.
+fn exec_start_config_arg(unit: &str) -> Option<String> {
+    let line = unit
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("ExecStart="))?
+        .trim();
+    let rest = line.split_once("--config")?.1.trim_start();
+    if let Some(rest) = rest.strip_prefix('"') {
+        return rest.split('"').next().filter(|s| !s.is_empty()).map(str::to_string);
+    }
+    rest.split_whitespace()
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Rebuild an installed unit at the current template version, or `None` when
+/// its stamp says there is nothing to do.
+///
+/// The binary is taken from the unit rather than from `current_exe()`: a
+/// refresh triggered from a build directory would otherwise repoint a working
+/// service at a copy that is about to be deleted.
+///
+/// The `--config` argument is kept too, with one exception. A unit written
+/// before configs moved into `config/` points at `<data root>/%I.json`, and
+/// only the fallback in `config::resolve_config_path` keeps those bots
+/// running; that exact legacy form is repointed at the real directory. Any
+/// other path is somebody's deliberate choice and is left alone.
+fn refreshed_unit(
+    installed: &str,
+    data_root: &Path,
+    config_base: &Path,
+    tools_dir: Option<&Path>,
+) -> Option<String> {
+    if unit_version_from_contents(installed) >= UNIT_FILE_VERSION {
+        return None;
+    }
+    let binary = exec_start_binary(installed)?;
+    // Both spellings: v0.7.0 wrote `%I`, releases before it wrote `%i`. Either
+    // one at the data root is the pre-`config/` layout and gets repointed.
+    // `%i` is the escaped instance name, so a bot whose name systemd had to
+    // escape was being handed a path to a file that does not exist.
+    let legacy_config = [data_root.join("%I.json"), data_root.join("%i.json")];
+    // The directory is escaped; `%I` is appended raw, exactly as
+    // `write_unit_file_for` builds it. Escaping the joined path instead would
+    // produce `%%I`, a literal percent-I rather than the instance name.
+    let current_config = format!(
+        "{}/%I.json",
+        escape_specifiers(&config_base.display().to_string())
+    );
+    let config_arg = match exec_start_config_arg(installed) {
+        Some(raw) if !legacy_config.contains(&PathBuf::from(unescape_specifiers(&raw))) => raw,
+        // No --config at all needs the same repair as the legacy path: point
+        // it where the configs actually live.
+        _ => current_config,
     };
-    if unit_version_from_contents(&contents) >= UNIT_FILE_VERSION {
-        return;
+    let exec_start = format!("\"{}\" --config \"{}\"", escape_specifiers(&binary), config_arg);
+    Some(unit_file_contents(&exec_start, config_base, tools_dir))
+}
+
+/// Bring an installed unit up to the current template when it is older.
+///
+/// Called from [`crate::postupdate::reconcile`], which runs in the binary that
+/// owns the current [`UNIT_FILE_VERSION`] — the point of the whole exercise.
+/// The version comparison used to happen in the process that was being
+/// replaced, which always compared a stamp against the constant that wrote it
+/// and so never fired.
+pub fn refresh_stale_unit() -> UnitRefresh {
+    let service_path = systemd_dir().join(SERVICE_NAME);
+    let Ok(installed) = std::fs::read_to_string(&service_path) else {
+        return UnitRefresh::NotInstalled;
+    };
+    let was = unit_version_from_contents(&installed);
+    let tools_dir = crate::youtube::setup::resolve_paths().ok().map(|p| p.lib_dir);
+    let Some(unit) = refreshed_unit(
+        &installed,
+        &config_dir(),
+        &crate::paths::configs_dir(),
+        tools_dir.as_deref(),
+    ) else {
+        return UnitRefresh::Current;
+    };
+
+    // Keep the outgoing file. The template invites edits (a custom --config
+    // needs its own ReadWritePaths line; the sandbox block has to go on a
+    // kernel without unprivileged user namespaces), and a rewrite takes those
+    // with it.
+    let backup = service_path.with_extension("service.bak");
+    let _ = std::fs::write(&backup, installed.as_bytes());
+
+    if let Err(e) = crate::paths::write_atomic(&service_path, unit.as_bytes()) {
+        return UnitRefresh::Failed(e.to_string());
     }
-    println!();
-    println!("Your systemd service file was written by an older version.");
-    println!("Rewriting it replaces any manual edits you made to it.");
-    if prompt_yes_no("Rewrite the service file now?") {
-        match write_unit_file() {
-            Ok(_) => println!("Service file updated (takes effect on the next bot restart)."),
-            Err(e) => println!("Could not update the service file: {e}"),
-        }
-    } else {
-        println!(
-            "Keeping the current file. To update it later, {}",
-            crate::hints::install_service()
-        );
-    }
+    let _ = Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status();
+    UnitRefresh::Refreshed(was)
 }
 
 /// Escape `%` for systemd, which reads it as the start of a specifier.
@@ -701,9 +796,159 @@ pub(crate) fn remove_service(note_untouched: bool) -> Result<(), BotError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_running_units, parse_unit_health, unit_file_contents, unit_version_from_contents,
-        UnitHealth, UNIT_FILE_VERSION,
+        exec_start_config_arg, parse_running_units, parse_unit_health, refreshed_unit,
+        unit_file_contents, unit_version_from_contents, UnitHealth, UNIT_FILE_VERSION,
     };
+    use std::path::Path;
+
+    /// A unit as v0.7.0 wrote it: stamp 2, configs still at the data root,
+    /// and none of the restart limits that release's successor added.
+    const LEGACY_UNIT: &str = r#"# ttspotify-unit-version: 2
+[Unit]
+Description=TTSpotify Bot (%i)
+
+[Service]
+Type=simple
+WorkingDirectory=/home/u/.config/ttspotify
+ExecStart="/home/u/.local/bin/ttspotify" --config "/home/u/.config/ttspotify/%I.json"
+Restart=on-failure
+RestartSec=2
+"#;
+
+    #[test]
+    fn a_current_unit_is_left_alone() {
+        let unit = unit_file_contents(
+            "\"/home/u/.local/bin/ttspotify\" --config \"/home/u/.config/ttspotify/config/%I.json\"",
+            Path::new("/home/u/.config/ttspotify/config"),
+            None,
+        );
+        assert_eq!(
+            refreshed_unit(
+                &unit,
+                Path::new("/home/u/.config/ttspotify"),
+                Path::new("/home/u/.config/ttspotify/config"),
+                None
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_stale_unit_is_rebuilt_at_the_current_version() {
+        let out = refreshed_unit(
+            LEGACY_UNIT,
+            Path::new("/home/u/.config/ttspotify"),
+            Path::new("/home/u/.config/ttspotify/config"),
+            None,
+        )
+        .expect("stamp 2 is older than the current template");
+        assert_eq!(unit_version_from_contents(&out), UNIT_FILE_VERSION);
+        // The reason an upgrade matters: v0.7.0's unit retried every two
+        // seconds forever, against somebody else's server.
+        assert!(out.contains("StartLimitBurst="));
+        assert!(out.contains("RestartSec=30"));
+    }
+
+    #[test]
+    fn an_unstamped_unit_counts_as_stale() {
+        let unit = LEGACY_UNIT.replace("# ttspotify-unit-version: 2\n", "");
+        assert!(refreshed_unit(
+            &unit,
+            Path::new("/home/u/.config/ttspotify"),
+            Path::new("/home/u/.config/ttspotify/config"),
+            None
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn the_refresh_keeps_the_binary_the_unit_already_ran() {
+        // Never current_exe(): a refresh run from a build directory would
+        // otherwise repoint a working service at a throwaway copy.
+        let out = refreshed_unit(
+            LEGACY_UNIT,
+            Path::new("/home/u/.config/ttspotify"),
+            Path::new("/home/u/.config/ttspotify/config"),
+            None,
+        )
+        .unwrap();
+        assert!(out.contains("ExecStart=\"/home/u/.local/bin/ttspotify\""));
+    }
+
+    #[test]
+    fn the_legacy_config_path_is_repointed_at_the_config_dir() {
+        let out = refreshed_unit(
+            LEGACY_UNIT,
+            Path::new("/home/u/.config/ttspotify"),
+            Path::new("/home/u/.config/ttspotify/config"),
+            None,
+        )
+        .unwrap();
+        assert!(out.contains("--config \"/home/u/.config/ttspotify/config/%I.json\""));
+        assert!(!out.contains("--config \"/home/u/.config/ttspotify/%I.json\""));
+    }
+
+    #[test]
+    fn the_pre_0_7_lowercase_instance_path_is_repointed_too() {
+        // v0.6.1 and earlier wrote no version stamp at all and spelled the
+        // instance `%i`, the escaped form — so a bot whose name systemd
+        // escaped was handed a path to a file that does not exist.
+        let unit = LEGACY_UNIT
+            .replace("# ttspotify-unit-version: 2\n", "")
+            .replace("/ttspotify/%I.json", "/ttspotify/%i.json");
+        let out = refreshed_unit(
+            &unit,
+            Path::new("/home/u/.config/ttspotify"),
+            Path::new("/home/u/.config/ttspotify/config"),
+            None,
+        )
+        .unwrap();
+        assert!(out.contains("--config \"/home/u/.config/ttspotify/config/%I.json\""));
+    }
+
+    #[test]
+    fn a_hand_written_config_path_survives_the_refresh() {
+        let unit = LEGACY_UNIT.replace(
+            "--config \"/home/u/.config/ttspotify/%I.json\"",
+            "--config \"/srv/bots/%I.json\"",
+        );
+        let out = refreshed_unit(
+            &unit,
+            Path::new("/home/u/.config/ttspotify"),
+            Path::new("/home/u/.config/ttspotify/config"),
+            None,
+        )
+        .unwrap();
+        assert!(out.contains("--config \"/srv/bots/%I.json\""));
+    }
+
+    #[test]
+    fn config_arg_is_read_quoted_or_bare() {
+        assert_eq!(
+            exec_start_config_arg("ExecStart=\"/opt/b\" --config \"/x/%I.json\"\n").as_deref(),
+            Some("/x/%I.json")
+        );
+        assert_eq!(
+            exec_start_config_arg("ExecStart=/opt/b --config /x/%I.json\n").as_deref(),
+            Some("/x/%I.json")
+        );
+        assert_eq!(exec_start_config_arg("ExecStart=/opt/b\n"), None);
+    }
+
+    #[test]
+    fn a_percent_in_a_path_survives_the_round_trip() {
+        // %% is systemd's literal percent; reading one back has to unescape it
+        // or every refresh doubles it.
+        let unit = LEGACY_UNIT.replace("/home/u/.local/bin/ttspotify", "/home/50%%u/bot");
+        let out = refreshed_unit(
+            &unit,
+            Path::new("/home/u/.config/ttspotify"),
+            Path::new("/home/u/.config/ttspotify/config"),
+            None,
+        )
+        .unwrap();
+        assert!(out.contains("ExecStart=\"/home/50%%u/bot\""));
+    }
 
     #[test]
     fn a_unit_between_crashes_reads_as_restarting_not_stopped() {

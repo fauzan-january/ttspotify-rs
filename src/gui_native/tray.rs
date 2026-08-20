@@ -71,6 +71,11 @@ pub fn run() {
     let log_dir = crate::paths::logs_dir();
     let _log_guard = crate::logging::init_file_logging(&log_dir, "tray");
     crate::paths::log_migration(&layout_migration);
+    // Catch up with whatever this build expects but the disk has not got yet.
+    // The tray relaunches itself after an update, so this is the new binary's
+    // first run either way; it is also what covers an exe replaced by hand.
+    // Never prompts: nothing may block the message loop before it exists.
+    crate::postupdate::reconcile(crate::postupdate::Mode::Startup);
 
     let wnd = gui::WindowMain::new(gui::WindowMainOpts {
         title: "TT Spotify",
