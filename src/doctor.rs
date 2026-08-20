@@ -229,6 +229,16 @@ pub fn report() {
     if wants_youtube && tools.yt_dlp.is_none() {
         fixes.push(format!("Install the YouTube tools - {}", crate::hints::install_youtube_tools()));
     }
+    // An install from before yt-dlp needed a JavaScript runtime reports every
+    // tool present and still fails on most tracks. Naming the problem without
+    // naming the cure sent people looking for a bug instead of running one
+    // command.
+    if wants_youtube && tools.yt_dlp.is_some() && tools.js_runtime.is_none() {
+        fixes.push(format!(
+            "Add the JavaScript runtime YouTube needs - {}",
+            crate::hints::update_youtube_tools()
+        ));
+    }
 
     let settings = crate::settings::load();
     let used = crate::audio_cache::size_bytes();
