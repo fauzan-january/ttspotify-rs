@@ -10,7 +10,7 @@
 //! Every prompt is seeded with the current value and Enter keeps it, so the
 //! cost of changing one setting is one number and one answer.
 
-use crate::config::{AdminMode, BotConfig, EnabledServices};
+use crate::config::{kick_delay_label, kick_delay_options, AdminMode, BotConfig, EnabledServices};
 use crate::error::BotError;
 use crate::services::Service;
 use crate::wizard::ask;
@@ -235,6 +235,25 @@ fn edit_server(config: &mut BotConfig) {
     let Some(encrypted) = ask_bool("Encrypted connection", config.encrypted) else { return };
     let Some(username) = ask("Bot username", &config.username, true) else { return };
     let Some(password) = ask_secret("Bot password", &config.password) else { return };
+    let kicked = config.rejoin_after_kick_seconds;
+    let Some(rejoin) = ask_bool("Rejoin after a server kick", kicked.is_some()) else { return };
+    let rejoin_after = if rejoin {
+        let current = kicked.unwrap_or(0);
+        let delays = kick_delay_options(current);
+        let labels: Vec<String> = delays.iter().map(|s| kick_delay_label(*s)).collect();
+        let options: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let Some(picked) = ask_choice("Wait first", &options, &kick_delay_label(current)) else {
+            return;
+        };
+        Some(
+            delays
+                .get(options.iter().position(|o| *o == picked).unwrap_or(0))
+                .copied()
+                .unwrap_or(0),
+        )
+    } else {
+        None
+    };
 
     config.host = host;
     config.tcp_port = tcp;
@@ -242,6 +261,7 @@ fn edit_server(config: &mut BotConfig) {
     config.encrypted = encrypted;
     config.username = username;
     config.password = password;
+    config.rejoin_after_kick_seconds = rejoin_after;
 }
 
 fn edit_identity(config: &mut BotConfig) {

@@ -453,6 +453,31 @@ impl<'de> Deserialize<'de> for EnabledServices {
     }
 }
 
+/// The kick delays offered, in seconds.
+pub const KICK_DELAYS: [u32; 4] = [0, 10, 30, 60];
+
+/// How a delay is written in the dropdown.
+pub fn kick_delay_label(seconds: u32) -> String {
+    match seconds {
+        0 => "Instantly".to_string(),
+        60 => "1 minute".to_string(),
+        s if s % 60 == 0 => format!("{} minutes", s / 60),
+        1 => "1 second".to_string(),
+        s => format!("{s} seconds"),
+    }
+}
+
+/// The delays to list, given what the config already holds. A hand-edited
+/// value that is not one of the presets is offered too rather than lost.
+pub fn kick_delay_options(current: u32) -> Vec<u32> {
+    let mut options = KICK_DELAYS.to_vec();
+    if !options.contains(&current) {
+        options.push(current);
+        options.sort_unstable();
+    }
+    options
+}
+
 /// Config format matches the Python ttspotify bot's data/config.json
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -550,6 +575,11 @@ pub struct BotConfig {
     // Helps avoid 403s on rate-limited or age-restricted videos.
     #[serde(default, rename = "youtubeCookiesFile")]
     pub youtube_cookies_file: String,
+
+    // Seconds to wait before reconnecting after a server kick.
+    // None = stay out until started again, Some(0) = reconnect at once.
+    #[serde(default, rename = "rejoinAfterKickSeconds")]
+    pub rejoin_after_kick_seconds: Option<u32>,
 }
 
 impl Default for BotConfig {
@@ -596,6 +626,7 @@ impl Default for BotConfig {
             default_service: Service::default(),
             enabled_services: EnabledServices::default(),
             youtube_cookies_file: String::new(),
+            rejoin_after_kick_seconds: None,
         }
     }
 }
@@ -1048,6 +1079,25 @@ mod choice_tests {
 #[cfg(test)]
 #[allow(clippy::field_reassign_with_default)] // tweaking a couple of fields off Default reads fine in tests
 mod tests {
+
+    #[test]
+    fn a_hand_edited_delay_is_offered_alongside_the_presets() {
+        use super::kick_delay_options;
+        assert_eq!(kick_delay_options(30), vec![0, 10, 30, 60]);
+        assert_eq!(kick_delay_options(45), vec![0, 10, 30, 45, 60]);
+        assert_eq!(kick_delay_options(600), vec![0, 10, 30, 60, 600]);
+    }
+
+    #[test]
+    fn delays_are_written_in_the_largest_unit_that_fits() {
+        use super::kick_delay_label;
+        assert_eq!(kick_delay_label(0), "Instantly");
+        assert_eq!(kick_delay_label(1), "1 second");
+        assert_eq!(kick_delay_label(30), "30 seconds");
+        assert_eq!(kick_delay_label(60), "1 minute");
+        assert_eq!(kick_delay_label(300), "5 minutes");
+        assert_eq!(kick_delay_label(45), "45 seconds");
+    }
 
     #[test]
     fn a_service_reads_back_however_it_was_capitalised() {

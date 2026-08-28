@@ -71,6 +71,8 @@ pub struct ConfigForm {
     pub default_language: String,
     pub admin_mode_index: u32,
     pub admin_users: String,
+    pub rejoin_after_kick: bool,
+    pub rejoin_after_kick_seconds: i32,
     // Audio
     pub spotify_quality: String,
     pub spotify_enable_normalization: bool,
@@ -113,6 +115,8 @@ impl ConfigForm {
             default_language: cfg.default_language.clone(),
             admin_mode_index: admin_mode_to_index(cfg.admin_mode),
             admin_users: cfg.admins.join(", "),
+            rejoin_after_kick: cfg.rejoin_after_kick_seconds.is_some(),
+            rejoin_after_kick_seconds: cfg.rejoin_after_kick_seconds.unwrap_or(0) as i32,
             spotify_quality: cfg.spotify_quality.clone(),
             spotify_enable_normalization: cfg.spotify_enable_normalization,
             normalisation_gain_db: cfg.normalisation_pregain_db.to_string(),
@@ -169,6 +173,9 @@ impl ConfigForm {
         cfg.license_key = non_empty(&self.license_key);
         cfg.admin_mode = index_to_admin_mode(self.admin_mode_index);
         cfg.admins = crate::bot::auth::parse_admin_list(&self.admin_users);
+        cfg.rejoin_after_kick_seconds = self
+            .rejoin_after_kick
+            .then(|| self.rejoin_after_kick_seconds.max(0) as u32);
         let lang = self.default_language.trim().to_lowercase();
         cfg.default_language = if lang.is_empty() { "en".to_string() } else { lang };
 
@@ -253,6 +260,29 @@ mod tests {
             max_volume: 100,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn the_kick_seconds_box_only_counts_when_the_bot_is_set_to_come_back() {
+        let cfg = base();
+        let mut form = ConfigForm::from_config(&cfg);
+        assert!(!form.rejoin_after_kick);
+
+        form.rejoin_after_kick_seconds = 30;
+        assert_eq!(form.apply(&cfg).rejoin_after_kick_seconds, None);
+
+        form.rejoin_after_kick = true;
+        assert_eq!(form.apply(&cfg).rejoin_after_kick_seconds, Some(30));
+
+        form.rejoin_after_kick_seconds = 0;
+        assert_eq!(form.apply(&cfg).rejoin_after_kick_seconds, Some(0));
+    }
+
+    #[test]
+    fn a_kick_delay_survives_a_round_trip_through_the_form() {
+        let cfg = BotConfig { rejoin_after_kick_seconds: Some(30), ..base() };
+        let form = ConfigForm::from_config(&cfg);
+        assert_eq!(form.apply(&cfg), cfg);
     }
 
     #[test]

@@ -28,6 +28,8 @@ pub enum BotExit {
     Restart,
     /// External shutdown signal (tray stop button, systemd stop).
     Shutdown,
+    /// Kicked off the server and configured not to come back.
+    Kicked,
 }
 
 /// Status events sent to the tray (or any observer).
@@ -236,6 +238,40 @@ fn channel_move_needs_flush(
     new: ::teamtalk::types::ChannelId,
 ) -> bool {
     prev != ::teamtalk::types::ChannelId(0) && prev != new
+}
+
+/// What to do about a `MySelfKicked` event. `source` is `TTMessage.nSource`:
+/// greater than zero is a kick from that channel, otherwise from the server.
+fn kick_action(source: i32, rejoin_after: Option<u32>) -> KickAction {
+    if source > 0 {
+        return KickAction::Ignore;
+    }
+    match rejoin_after {
+        None => KickAction::Stop,
+        Some(secs) => KickAction::Rejoin(secs),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KickAction {
+    Ignore,
+    Stop,
+    Rejoin(u32),
+}
+
+/// Sleep for `total`, returning false if `shutdown` was set before it elapsed.
+fn wait_or_shutdown(shutdown: &Arc<AtomicBool>, total: Duration) -> bool {
+    let deadline = Instant::now() + total;
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            return false;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        std::thread::sleep(left.min(Duration::from_millis(100)));
+    }
 }
 
 /// Run a single bot instance. Returns when the bot exits.
@@ -587,6 +623,7 @@ pub async fn run_bot(
     let event_event_tx = event_tx.clone();
     let event_last_channel = last_channel.clone();
     let event_stream_flush = stream_flush.clone();
+    let kick_rejoin = config.rejoin_after_kick_seconds;
     // If the SDK's auto-reconnect can't restore the session within this window,
     // stop spinning and return an error so the supervisor (tray restart /
     // systemd Restart=) can recover with a fresh client instead of the bot
@@ -660,6 +697,30 @@ pub async fn run_bot(
                         }
                         if let Some(ref tx) = event_event_tx {
                             let _ = tx.send(RunnerEvent::Connected);
+                        }
+                    }
+                    ::teamtalk::Event::MySelfKicked => {
+                        match kick_action(message.source(), kick_rejoin) {
+                            KickAction::Ignore => {}
+                            // Turn off the SDK's login recovery before leaving:
+                            // it is what logs straight back in, and it would
+                            // race the teardown.
+                            KickAction::Stop => {
+                                event_client.disable_auto_reconnect();
+                                tracing::info!(
+                                    "Kicked from the server; staying out (rejoinAfterKickSeconds is not set)"
+                                );
+                                *event_exit.lock() = Some(BotExit::Kicked);
+                                break false;
+                            }
+                            KickAction::Rejoin(secs) => {
+                                event_client.disable_auto_reconnect();
+                                tracing::info!("Kicked from the server; reconnecting in {secs}s");
+                                if wait_or_shutdown(&event_shutdown, Duration::from_secs(u64::from(secs))) {
+                                    *event_exit.lock() = Some(BotExit::Restart);
+                                }
+                                break false;
+                            }
                         }
                     }
                     ::teamtalk::Event::UserJoined => {
@@ -2421,6 +2482,34 @@ mod tests {
     use crate::spotify::types::SpotifyTrack;
     use crate::track::Track;
     use rstest::rstest;
+
+    // -- kick_action --
+
+    #[rstest]
+    // Kicked from a channel: left alone whatever the setting says.
+    #[case(2, None, KickAction::Ignore)]
+    #[case(2, Some(30), KickAction::Ignore)]
+    // Kicked from the server. nSource is 0, but the SDK only promises "not
+    // greater than zero", so a negative source is a server kick too.
+    #[case(0, None, KickAction::Stop)]
+    #[case(-1, None, KickAction::Stop)]
+    #[case(0, Some(0), KickAction::Rejoin(0))]
+    #[case(0, Some(30), KickAction::Rejoin(30))]
+    fn kick_action_reads_source_then_config(
+        #[case] source: i32,
+        #[case] rejoin_after: Option<u32>,
+        #[case] expected: KickAction,
+    ) {
+        assert_eq!(kick_action(source, rejoin_after), expected);
+    }
+
+    #[test]
+    fn wait_or_shutdown_reports_an_interrupted_wait() {
+        let flag = Arc::new(AtomicBool::new(false));
+        assert!(wait_or_shutdown(&flag, Duration::from_millis(0)));
+        flag.store(true, Ordering::Relaxed);
+        assert!(!wait_or_shutdown(&flag, Duration::from_secs(30)));
+    }
 
     // -- radio_skip_reason --
 

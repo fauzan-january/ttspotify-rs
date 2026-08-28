@@ -18,6 +18,7 @@ use winsafe::prelude::*;
 use winsafe::{self as w, co, gui};
 
 use crate::config::BotConfig;
+use crate::config::{kick_delay_label, kick_delay_options};
 use crate::gui_native::config_form::{
     mode_uses_username_list, ConfigForm, ADMIN_MODE_LABELS,
 };
@@ -50,6 +51,9 @@ struct ServerPage {
     cookies: gui::Edit,
     admin_mode: gui::ComboBox,
     admin_users: gui::Edit,
+    kick_delay: gui::ComboBox,
+    /// Seconds behind each dropdown entry after the leading "Never".
+    kick_delays: Vec<u32>,
 }
 
 /// Controls on the Audio page.
@@ -110,6 +114,8 @@ pub fn show(
         cookies: gui::Edit::new_dlg(&server_pg, IDC_COOKIES, (gui::Horz::Resize, gui::Vert::None)),
         admin_mode: gui::ComboBox::new_dlg(&server_pg, IDC_ADMIN_MODE, (gui::Horz::Resize, gui::Vert::None)),
         admin_users: gui::Edit::new_dlg(&server_pg, IDC_ADMIN_USERS, (gui::Horz::Resize, gui::Vert::Resize)),
+        kick_delay: gui::ComboBox::new_dlg(&server_pg, IDC_KICK_SECS, (gui::Horz::Resize, gui::Vert::None)),
+        kick_delays: kick_delay_options(config.rejoin_after_kick_seconds.unwrap_or(0)),
     });
 
     let audio = Rc::new(AudioPage {
@@ -213,6 +219,24 @@ pub fn show(
             let _ = radio.search_limit.set_text(&form.search_limit.to_string());
             server.admin_mode.items().select(Some(form.admin_mode_index));
             let _ = server.admin_users.set_text(&form.admin_users);
+            // One combo, "Never" first: a radio pair spoke only its own
+            // caption to a screen reader, so the row read as a bare "Never"
+            // with no hint what it was about. A labelled combo reads the
+            // preceding static, the way every other row on this tab does.
+            let mut labels = vec!["Never".to_string()];
+            labels.extend(server.kick_delays.iter().map(|s| kick_delay_label(*s)));
+            let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+            let _ = server.kick_delay.items().add(&label_refs);
+            let chosen = if form.rejoin_after_kick {
+                server
+                    .kick_delays
+                    .iter()
+                    .position(|s| *s as i32 == form.rejoin_after_kick_seconds)
+                    .map_or(0, |at| at as u32 + 1)
+            } else {
+                0
+            };
+            server.kick_delay.items().select(Some(chosen));
             // The username list is meaningless in the modes that ignore it.
             server
                 .admin_users
@@ -407,6 +431,14 @@ fn read_form(server: &ServerPage, audio: &AudioPage, radio: &RadioPage) -> Confi
         default_language: combo_text(&server.language),
         admin_mode_index: server.admin_mode.items().selected_index().unwrap_or(3),
         admin_users: text(&server.admin_users),
+        rejoin_after_kick: server.kick_delay.items().selected_index().unwrap_or(0) > 0,
+        rejoin_after_kick_seconds: server
+            .kick_delay
+            .items()
+            .selected_index()
+            .filter(|i| *i > 0)
+            .and_then(|i| server.kick_delays.get(i as usize - 1).copied())
+            .unwrap_or(0) as i32,
         spotify_quality: combo_text(&audio.quality),
         spotify_enable_normalization: audio.normalize.is_checked(),
         normalisation_gain_db: text(&audio.norm_gain),

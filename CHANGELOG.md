@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Kicking the bot off the server now works. It came straight back, within a
+  second, as many times as you kicked it, because the reconnect that covers a
+  dropped connection could not tell a kick from one. Kicking is what you are
+  left with when a bot has stopped answering, so it now stays out.
+
+### Added
+- A setting for what a bot does when it is kicked off the server: stay out, or
+  come back instantly, after 10 seconds, after 30 seconds or after a minute.
+  Staying out is the default, including for bots you already have. It is on the
+  Server tab in the tray's config editor, in "Server and login" under "edit" on
+  Linux, and is called "rejoinAfterKickSeconds" in the config file, where any
+  number of seconds is accepted. Being kicked from a channel is unchanged.
+
 ## [1.0.0] - 2026-08-19
 
 **Upgrading on Linux: run `ttspotify service install` once after updating.**
