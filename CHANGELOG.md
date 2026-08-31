@@ -1,12 +1,6 @@
 # Changelog
 
-## [Unreleased]
-
-### Fixed
-- Kicking the bot off the server now works. It came straight back, within a
-  second, as many times as you kicked it, because the reconnect that covers a
-  dropped connection could not tell a kick from one. Kicking is what you are
-  left with when a bot has stopped answering, so it now stays out.
+## [1.1.0] - 2026-08-31
 
 ### Added
 - A setting for what a bot does when it is kicked off the server: stay out, or
@@ -15,6 +9,26 @@
   Server tab in the tray's config editor, in "Server and login" under "edit" on
   Linux, and is called "rejoinAfterKickSeconds" in the config file, where any
   number of seconds is accepted. Being kicked from a channel is unchanged.
+
+### Fixed
+- Kicking the bot off the server now works. It came straight back, within a
+  second, as many times as you kicked it, because the reconnect that covers a
+  dropped connection could not tell a kick from one. Kicking is what you are
+  left with when a bot has stopped answering, so it now stays out.
+- Updating now finishes the job itself. The service file on Linux was never
+  rewritten by an update, whatever the release notes said: the check ran in the
+  version being replaced, which only ever knew its own service file was
+  current, so it stayed silent and the file stayed as it was. That is why 1.0.0
+  had to ask you to run the service install by hand. Anyone still on an older
+  service file kept the fault it fixes - a bot that cannot reach its server
+  retrying every two seconds, for as long as the machine is on, against
+  somebody else's server. The new version now does its own catching up, and it
+  does it whichever way you updated: the built-in updater, a new download over
+  the old one, or a package. Your service file is brought up to date and the
+  previous one kept alongside it as a .bak, new settings are added to your
+  configs, and the bot tells you if its YouTube tools are missing the
+  JavaScript runtime YouTube now needs, which "doctor" reports too instead of
+  naming the problem and no cure.
 
 ## [1.0.0] - 2026-08-19
 
